@@ -44,6 +44,27 @@ async function init() {
       .join('');
     document.getElementById('source-card').classList.remove('hidden');
     setStatus(`Loaded ${sourcePlaylists.length} playlists you own.`);
+
+    // Reattach to an analysis still running server-side from before a
+    // reload, instead of leaving the page looking idle while it finishes
+    // (and instead of letting a fresh Analyse click start a duplicate run).
+    let inProgress;
+    try {
+      inProgress = await api('/api/analyze/status');
+    } catch (e) {
+      inProgress = null;  // nothing has been started yet this session
+    }
+    if (inProgress && !inProgress.done) {
+      document.getElementById('analyze-btn').disabled = true;
+      setStatus(`Resuming analysis: ${inProgress.current}/${inProgress.total}...`);
+      try {
+        await pollAnalysis();
+      } catch (e) {
+        setStatus('Error: ' + e.message, true);
+      } finally {
+        document.getElementById('analyze-btn').disabled = false;
+      }
+    }
   } catch (e) {
     setStatus('Error: ' + e.message, true);
   }
@@ -81,20 +102,51 @@ function confidenceBadge(track) {
   return '<span class="confidence-badge none">No match</span>';
 }
 
+// A track's genre(s) -- at most 2, combined across all 3 sources (see
+// display_genres in genre.py) so multi-source agreement decides the
+// label instead of dumping every raw tag from every source. Empty when
+// nothing was detected anywhere, so a track with no data just shows
+// nothing rather than "no tags found" x3 -- shown regardless of match
+// state, so a "Needs Review" or "Unmatched" track still shows what was
+// actually detected, not just a pass/fail vote pill.
+function genrePills(track) {
+  const genres = track.display_genres || [];
+  return genres.map(g => `<span class="vote-pill matched">${g}</span>`).join('');
+}
+
 // ---------------------------------------------------------------- analyze
+
+const ANALYZE_POLL_MS = 800;
+
+async function pollAnalysis() {
+  while (true) {
+    const status = await api('/api/analyze/status');
+    if (!status.done) {
+      setStatus(`Classifying tracks: ${status.current}/${status.total} (MusicBrainz limits lookups to 1/sec, so this can take a while)...`);
+      await new Promise(r => setTimeout(r, ANALYZE_POLL_MS));
+      continue;
+    }
+    if (status.error) {
+      throw new Error(status.error);
+    }
+    renderBreakdown(status);
+    setStatus(`Analyzed ${status.total_tracks} tracks.`);
+    return;
+  }
+}
 
 document.getElementById('analyze-btn').onclick = async () => {
   const sourceId = document.getElementById('source-select').value;
-  setStatus('Fetching tracks and voting on genres (this can take a while on large playlists -- MusicBrainz limits lookups to 1/sec)...');
+  setStatus('Fetching playlist tracks...');
   document.getElementById('analyze-btn').disabled = true;
   try {
-    const data = await api('/api/analyze', {
+    const started = await api('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ source_playlist_id: sourceId }),
     });
-    renderBreakdown(data);
-    setStatus(`Analyzed ${data.total_tracks} tracks.`);
+    setStatus(`Classifying tracks: 0/${started.total}...`);
+    await pollAnalysis();
   } catch (e) {
     setStatus('Error: ' + e.message, true);
   } finally {
@@ -127,7 +179,14 @@ function renderBreakdown(data) {
       <div class="bar-track"><div class="bar-fill ${stateClassFor(label)}" style="width:${(count / maxCount * 100).toFixed(0)}%"></div></div>
     </div>
     <div class="track-list hidden" id="bd-panel-${i}">
-      ${(tracksByGenre[label] || []).map(t => `<div>${t.name} <span class="muted">— ${t.artist}</span> ${votePills(t)}</div>`).join('')}
+      ${(tracksByGenre[label] || []).map(t => `
+        <div class="track-row">
+          <div class="track-info">
+            <div class="track-title">${t.name} <span class="track-artist">— ${t.artist}</span></div>
+            ${genrePills(t) ? `<div class="vote-row">${genrePills(t)}</div>` : ''}
+          </div>
+        </div>
+      `).join('')}
     </div>
   `).join('');
 
@@ -140,9 +199,21 @@ function renderBreakdown(data) {
     };
   });
 
+  renderDominantGenre(data);
   document.getElementById('breakdown-card').classList.remove('hidden');
   renderReview(data);
   renderMapping(data);
+}
+
+function renderDominantGenre(data) {
+  const el = document.getElementById('dominant-genre-summary');
+  const rows = data.dominant_genre || [];
+  if (rows.length === 0) {
+    el.innerHTML = 'No genre data detected for this playlist.';
+    return;
+  }
+  el.innerHTML = 'Dominant genre (by track tags, not playlist name): ' +
+    rows.map(r => `<strong>${r.pct}% ${r.label}</strong>`).join(', ');
 }
 
 // ------------------------------------------------------------------ review
@@ -167,6 +238,7 @@ function renderReview(data) {
       <div class="track-info">
         <div class="track-title">${t.name} <span class="track-artist">— ${t.artist}</span></div>
         <div class="vote-row">${votePills(t)}${agreementMeter(t)}</div>
+        ${genrePills(t) ? `<div class="vote-row">${genrePills(t)}</div>` : ''}
       </div>
       <select class="resolve-select" data-uri="${t.uri}">${resolveOptions}</select>
     </div>

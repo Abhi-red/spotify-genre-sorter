@@ -13,6 +13,7 @@ class SessionData:
     oauth_state: Optional[str] = None       # CSRF state for the in-flight OAuth request
     last_analysis: Optional[dict] = None    # {source_playlist_id, tracks, breakdown}
     pending_plan: Optional[dict] = None     # last computed preview, confirm re-validates against it
+    analyze_progress: Optional[dict] = None  # {current, total, done, error} for the in-flight/last /api/analyze run
 
 
 SESSIONS: dict[str, SessionData] = {}

@@ -5,10 +5,11 @@ Run with: uvicorn main:app --host 127.0.0.1 --port 8080
 registered in the Spotify Developer Dashboard for this app -- no path, so
 the OAuth callback is handled at "/" itself, disambiguated by query params.)
 """
+import asyncio
 import os
 
 from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse, JSONResponse, FileResponse
+from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.concurrency import run_in_threadpool
 
@@ -23,6 +24,30 @@ app = FastAPI()
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def _index_html() -> str:
+    """Cache-busts app.js with its mtime so a browser that already cached
+    an old copy (from before this file existed, so it never saw the
+    no-store header below) is forced onto a URL it has never fetched,
+    instead of silently continuing to run stale JS against a newer
+    backend -- see the /api/analyze response-shape mismatch this caused."""
+    path = os.path.join(STATIC_DIR, "index.html")
+    js_mtime = int(os.path.getmtime(os.path.join(STATIC_DIR, "app.js")))
+    with open(path, "r", encoding="utf-8") as f:
+        html = f.read()
+    return html.replace('/static/app.js"', f'/static/app.js?v={js_mtime}"')
+
+
+@app.middleware("http")
+async def no_cache_static(request: Request, call_next):
+    """Local dev tool, not a deployed site -- a stale cached app.js/index.html
+    silently talking to a newer backend (mismatched response shapes) is a
+    worse failure mode than always refetching a few small static files."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/") or request.url.path == "/":
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 COOKIE = session_store.COOKIE_NAME
 
@@ -69,7 +94,7 @@ def root(request: Request, code: str | None = None, state: str | None = None, er
         resp.set_cookie(COOKIE, sid, httponly=True, samesite="lax")
         return resp
 
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    return HTMLResponse(_index_html())
 
 
 @app.get("/api/login")
@@ -113,13 +138,16 @@ def playlists(request: Request):
     return {"playlists": pls}
 
 
-def _classify_playlist(token, raw_tracks):
+def _classify_playlist(token, raw_tracks, progress):
     """All blocking work for one analyze pass (Spotify batch genre fetch +
     per-track multi-source voting). Runs off the event loop via
     run_in_threadpool -- this does real network I/O (including
     MusicBrainz's mandatory 1 req/sec throttle), which would otherwise
     freeze every other request the server needs to handle for the whole
-    duration of the analysis."""
+    duration of the analysis.
+
+    progress is a plain dict the caller polls from another request
+    (/api/analyze/status) -- mutated in place as tracks are classified."""
     # One batched pass to populate Spotify genres for every artist on this
     # page, so the per-track classification below is a pure cache read for
     # that source instead of one API call per track.
@@ -157,6 +185,7 @@ def _classify_playlist(token, raw_tracks):
             "raw_tags": result["raw_tags"],
         })
         breakdown[label] = breakdown.get(label, 0) + 1
+        progress["current"] = i + 1
 
         if (i + 1) % 10 == 0 or i + 1 == total:
             print(f"[analyze] classified {i + 1}/{total} tracks")
@@ -167,11 +196,42 @@ def _classify_playlist(token, raw_tracks):
     return tracks, breakdown
 
 
+async def _run_analysis(sess: session_store.SessionData, token: str, source_playlist_id: str, raw_tracks: list):
+    """Background job: classifies every track and, when done, stores the
+    result on the session. sess.analyze_progress is the only channel back
+    to the polling /api/analyze/status handler, so every exit path
+    (success or failure) must set progress["done"] = True."""
+    progress = sess.analyze_progress
+    try:
+        tracks, breakdown = await run_in_threadpool(_classify_playlist, token, raw_tracks, progress)
+        sess.last_analysis = {
+            "source_playlist_id": source_playlist_id,
+            "tracks": tracks,
+            "breakdown": breakdown,
+            # Majority vote across each track's own detected genre tags --
+            # never the playlist's own name/title, which is often a mood
+            # label ("Chill") rather than an actual genre.
+            "dominant_genre": genre_mod.dominant_genre_summary(tracks),
+        }
+        sess.pending_plan = None  # invalidate any stale preview from a prior analysis
+    except Exception as e:
+        progress["error"] = str(e)
+    finally:
+        progress["done"] = True
+
+
 @app.post("/api/analyze")
 async def analyze(request: Request):
     sess = _require_session(request)
     if sess is None:
         return JSONResponse({"error": "not logged in"}, status_code=401)
+
+    # A run already in flight for this session -- reattach instead of
+    # kicking off a duplicate (e.g. a page reload while the first run was
+    # still classifying, followed by hitting Analyse again).
+    if sess.analyze_progress is not None and not sess.analyze_progress["done"]:
+        return {"already_running": True, **sess.analyze_progress}
+
     body = await request.json()
     source_playlist_id = body.get("source_playlist_id")
     if not source_playlist_id:
@@ -180,21 +240,30 @@ async def analyze(request: Request):
     token = _access_token(sess)
     raw_tracks = await run_in_threadpool(spotify_api.get_all_playlist_tracks, token, source_playlist_id)
     print(f"[analyze] fetched {len(raw_tracks)} tracks, classifying...")
-    tracks, breakdown = await run_in_threadpool(_classify_playlist, token, raw_tracks)
 
-    sess.last_analysis = {
-        "source_playlist_id": source_playlist_id,
-        "tracks": tracks,
-        "breakdown": breakdown,
-    }
-    sess.pending_plan = None  # invalidate any stale preview from a prior analysis
+    sess.analyze_progress = {"current": 0, "total": len(raw_tracks), "done": False, "error": None}
+    asyncio.create_task(_run_analysis(sess, token, source_playlist_id, raw_tracks))
 
-    return {
-        "source_playlist_id": source_playlist_id,
-        "total_tracks": len(tracks),
-        "breakdown": breakdown,
-        "tracks": tracks,
-    }
+    return {"started": True, "total": len(raw_tracks)}
+
+
+@app.get("/api/analyze/status")
+def analyze_status(request: Request):
+    sess = _require_session(request)
+    if sess is None:
+        return JSONResponse({"error": "not logged in"}, status_code=401)
+    if sess.analyze_progress is None:
+        return JSONResponse({"error": "no analysis has been started"}, status_code=400)
+
+    progress = sess.analyze_progress
+    resp = dict(progress)
+    if progress["done"] and not progress["error"] and sess.last_analysis is not None:
+        resp["source_playlist_id"] = sess.last_analysis["source_playlist_id"]
+        resp["total_tracks"] = len(sess.last_analysis["tracks"])
+        resp["breakdown"] = sess.last_analysis["breakdown"]
+        resp["tracks"] = sess.last_analysis["tracks"]
+        resp["dominant_genre"] = sess.last_analysis["dominant_genre"]
+    return resp
 
 
 @app.post("/api/resolve_review")
@@ -227,6 +296,7 @@ async def resolve_review(request: Request):
         "total_tracks": len(tracks),
         "breakdown": breakdown,
         "tracks": tracks,
+        "dominant_genre": sess.last_analysis["dominant_genre"],
     }
 
 
