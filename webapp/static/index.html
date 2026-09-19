@@ -1,0 +1,66 @@
+<title>Genre Sorter</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+
+<header class="console-header">
+  <div class="wordmark">Genre Sorter<span class="wordmark-dim"> · Spotify playlist sorting</span></div>
+  <div class="header-status row">
+    <span id="connect-label" class="status-text">Not connected</span>
+    <button id="connect-btn">Connect Spotify</button>
+    <button id="logout-btn" class="secondary hidden">Log out</button>
+  </div>
+</header>
+
+<div id="status" class="statusline"></div>
+
+<div class="module hidden" id="source-card">
+  <div class="module-head"><span class="step-tag">01</span><h2>Pick a source playlist</h2></div>
+  <p class="module-hint">Fetches every track and votes on each one's genre across Spotify, Last.fm, and MusicBrainz. Lookups are cached per artist/track, so a second run on the same playlist is much faster.</p>
+  <div class="row">
+    <select id="source-select"></select>
+    <button id="analyze-btn">Analyze genres</button>
+  </div>
+</div>
+
+<div class="module hidden" id="breakdown-card">
+  <div class="module-head"><span class="step-tag">02</span><h2>Genre breakdown</h2></div>
+  <div id="breakdown-list"></div>
+</div>
+
+<div class="module hidden" id="review-card">
+  <div class="module-head"><span class="step-tag">02b</span><h2>Review low-confidence matches</h2></div>
+  <p class="module-hint">Only one source matched, or the sources disagreed. Assign a genre to sort a track, or leave it for later.</p>
+  <div id="review-list"></div>
+  <div class="row" style="margin-top:12px;">
+    <button id="save-review-btn" class="secondary">Save review choices</button>
+  </div>
+</div>
+
+<div class="module hidden" id="mapping-card">
+  <div class="module-head"><span class="step-tag">03</span><h2>Map genres to target playlists</h2></div>
+  <p class="module-hint">For each detected genre, choose a playlist to copy those tracks into, or leave as "Don't sort" to skip it.</p>
+  <div id="mapping-list"></div>
+  <div class="row" style="margin-top:14px;">
+    <label><input type="checkbox" id="remove-from-source"> Remove from source playlist after copying (move instead of copy)</label>
+  </div>
+  <div class="row" style="margin-top:10px;">
+    <button id="preview-btn">Preview changes</button>
+  </div>
+</div>
+
+<div class="module hidden" id="preview-card">
+  <div class="module-head"><span class="step-tag">04</span><h2>Review before writing anything</h2></div>
+  <div id="preview-list"></div>
+  <div class="row" style="margin-top:14px;">
+    <button id="confirm-btn">Confirm and apply</button>
+    <span class="muted">Nothing has been written to Spotify yet.</span>
+  </div>
+</div>
+
+<div class="module hidden" id="result-card">
+  <div class="module-head"><h2>Done</h2></div>
+  <ul class="log-list" id="result-list"></ul>
+</div>
+
+<script src="/static/app.js"></script>
