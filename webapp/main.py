@@ -167,22 +167,15 @@ def _classify_playlist(token, raw_tracks, progress):
         artist = artists[0]["name"] if artists else "<unknown artist>"
         uri = t.get("uri")
         result = genre_mod.classify_track_multi_source(t, GENRE_CACHE)
-
-        if result["confidence"] == "high":
-            label = result["bucket"]
-        elif result["confidence"] == "low":
-            label = genre_mod.NEEDS_REVIEW
-        else:
-            label = genre_mod.UNMATCHED
+        label = result["genre"]
 
         tracks.append({
             "uri": uri,
             "name": name,
             "artist": artist,
             "genre": label,
-            "confidence": result["confidence"],
-            "votes": result["votes"],
             "raw_tags": result["raw_tags"],
+            "display_genres": result["display_genres"],
         })
         breakdown[label] = breakdown.get(label, 0) + 1
         progress["current"] = i + 1
@@ -208,12 +201,7 @@ async def _run_analysis(sess: session_store.SessionData, token: str, source_play
             "source_playlist_id": source_playlist_id,
             "tracks": tracks,
             "breakdown": breakdown,
-            # Majority vote across each track's own detected genre tags --
-            # never the playlist's own name/title, which is often a mood
-            # label ("Chill") rather than an actual genre.
-            "dominant_genre": genre_mod.dominant_genre_summary(tracks),
         }
-        sess.pending_plan = None  # invalidate any stale preview from a prior analysis
     except Exception as e:
         progress["error"] = str(e)
     finally:
@@ -262,16 +250,19 @@ def analyze_status(request: Request):
         resp["total_tracks"] = len(sess.last_analysis["tracks"])
         resp["breakdown"] = sess.last_analysis["breakdown"]
         resp["tracks"] = sess.last_analysis["tracks"]
-        resp["dominant_genre"] = sess.last_analysis["dominant_genre"]
     return resp
 
 
-@app.post("/api/resolve_review")
-async def resolve_review(request: Request):
-    """body: {resolutions: {uri: bucket_name_or_null}}. Manually assigns a
-    genre bucket to "Needs Review" tracks (or leaves them for later, if
-    the resolution is null/absent). Recomputes breakdown and invalidates
-    any stale preview so mapping/preview reflect the updated genres."""
+@app.post("/api/move")
+async def move(request: Request):
+    """body: {uris: [...], target_playlist_id, remove_from_source}. Adds
+    the given tracks to target_playlist_id and, if remove_from_source is
+    true, removes them from the analyzed source playlist. Works
+    identically for a single track or an entire genre bucket's worth --
+    the caller decides scope via which uris it sends. No separate preview
+    endpoint: the frontend already holds full track data client-side
+    after analyze and builds its own confirm dialog before calling
+    this."""
     sess = _require_session(request)
     if sess is None:
         return JSONResponse({"error": "not logged in"}, status_code=401)
@@ -279,102 +270,21 @@ async def resolve_review(request: Request):
         return JSONResponse({"error": "run /api/analyze first"}, status_code=400)
 
     body = await request.json()
-    resolutions = body.get("resolutions", {})
-
-    tracks = sess.last_analysis["tracks"]
-    for t in tracks:
-        if t["uri"] in resolutions and resolutions[t["uri"]]:
-            t["genre"] = resolutions[t["uri"]]
-
-    breakdown = {}
-    for t in tracks:
-        breakdown[t["genre"]] = breakdown.get(t["genre"], 0) + 1
-    sess.last_analysis["breakdown"] = breakdown
-    sess.pending_plan = None  # stale preview from before this resolution
-
-    return {
-        "total_tracks": len(tracks),
-        "breakdown": breakdown,
-        "tracks": tracks,
-        "dominant_genre": sess.last_analysis["dominant_genre"],
-    }
-
-
-@app.post("/api/preview")
-async def preview(request: Request):
-    sess = _require_session(request)
-    if sess is None:
-        return JSONResponse({"error": "not logged in"}, status_code=401)
-    if sess.last_analysis is None:
-        return JSONResponse({"error": "run /api/analyze first"}, status_code=400)
-
-    body = await request.json()
-    mapping = body.get("mapping", {})  # genre label -> target playlist id (falsy = don't sort)
-
-    token = _access_token(sess)
-    user = spotify_api.get_current_user(token)
-    owned = {p["id"]: p["name"] for p in spotify_api.get_owned_playlists(token, user["id"])}
-
-    tracks = sess.last_analysis["tracks"]
-    by_target: dict[str, list] = {}
-    unmapped = []
-    for t in tracks:
-        target_id = mapping.get(t["genre"])
-        if not target_id:
-            unmapped.append(t)
-            continue
-        if target_id not in owned:
-            return JSONResponse({"error": f"unknown target playlist {target_id}"}, status_code=400)
-        by_target.setdefault(target_id, []).append(t)
-
-    result = {
-        "targets": [
-            {"playlist_id": pid, "playlist_name": owned[pid], "tracks": ts, "count": len(ts)}
-            for pid, ts in by_target.items()
-        ],
-        "unmapped": unmapped,
-        "unmapped_count": len(unmapped),
-    }
-    sess.pending_plan = {"mapping": mapping, "preview": result}
-    return result
-
-
-@app.post("/api/confirm")
-async def confirm(request: Request):
-    sess = _require_session(request)
-    if sess is None:
-        return JSONResponse({"error": "not logged in"}, status_code=401)
-    if sess.pending_plan is None:
-        return JSONResponse({"error": "run /api/preview first"}, status_code=400)
-
-    body = await request.json()
+    uris = body.get("uris") or []
+    target_playlist_id = body.get("target_playlist_id")
     remove_from_source = bool(body.get("remove_from_source", False))
+    if not uris:
+        return JSONResponse({"error": "uris required"}, status_code=400)
+    if not target_playlist_id:
+        return JSONResponse({"error": "target_playlist_id required"}, status_code=400)
 
     token = _access_token(sess)
-    preview_data = sess.pending_plan["preview"]
-    source_playlist_id = sess.last_analysis["source_playlist_id"]
+    await run_in_threadpool(spotify_api.add_tracks_to_playlist, token, target_playlist_id, uris)
 
-    results = []
-    all_moved_uris = []
-    for target in preview_data["targets"]:
-        uris = [t["uri"] for t in target["tracks"]]
-        spotify_api.add_tracks_to_playlist(token, target["playlist_id"], uris)
-        results.append({
-            "playlist_id": target["playlist_id"],
-            "playlist_name": target["playlist_name"],
-            "added": len(uris),
-        })
-        all_moved_uris.extend(uris)
+    removed = 0
+    if remove_from_source:
+        source_playlist_id = sess.last_analysis["source_playlist_id"]
+        await run_in_threadpool(spotify_api.remove_tracks_from_playlist, token, source_playlist_id, uris)
+        removed = len(uris)
 
-    removed_count = 0
-    if remove_from_source and all_moved_uris:
-        spotify_api.remove_tracks_from_playlist(token, source_playlist_id, all_moved_uris)
-        removed_count = len(all_moved_uris)
-
-    sess.pending_plan = None  # consumed -- can't double-apply the same plan
-
-    return {
-        "results": results,
-        "removed_from_source": removed_count,
-        "unmapped_left_in_place": preview_data["unmapped_count"],
-    }
+    return {"added": len(uris), "removed": removed, "target_playlist_id": target_playlist_id}
