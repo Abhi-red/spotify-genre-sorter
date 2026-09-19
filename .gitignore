@@ -20,3 +20,6 @@ unsorted.txt
 
 # Unrelated nested repo (has its own .git/, not part of this project)
 Manware-s-AI-Learning-Toolkit/
+
+# Isolated worktrees for subagent-driven feature work
+.worktrees/
