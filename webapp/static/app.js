@@ -84,7 +84,7 @@ function genrePills(track) {
 }
 
 function targetOptionsHtml() {
-  const sourceId = document.getElementById('source-select').value;
+  const sourceId = (lastAnalysis && lastAnalysis.source_playlist_id) || document.getElementById('source-select').value;
   return sourcePlaylists
     .filter(p => p.id !== sourceId)
     .map(p => `<option value="${p.id}">${p.name}</option>`)

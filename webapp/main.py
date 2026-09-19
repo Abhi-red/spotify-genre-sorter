@@ -277,14 +277,26 @@ async def move(request: Request):
         return JSONResponse({"error": "uris required"}, status_code=400)
     if not target_playlist_id:
         return JSONResponse({"error": "target_playlist_id required"}, status_code=400)
+    if target_playlist_id == sess.last_analysis["source_playlist_id"]:
+        return JSONResponse({"error": "target is the source playlist"}, status_code=400)
 
     token = _access_token(sess)
-    await run_in_threadpool(spotify_api.add_tracks_to_playlist, token, target_playlist_id, uris)
+    try:
+        await run_in_threadpool(spotify_api.add_tracks_to_playlist, token, target_playlist_id, uris)
+    except spotify_api.SpotifyAPIError as e:
+        return JSONResponse({"error": f"failed to add tracks: {e}"}, status_code=502)
 
     removed = 0
+    remove_error = None
     if remove_from_source:
         source_playlist_id = sess.last_analysis["source_playlist_id"]
-        await run_in_threadpool(spotify_api.remove_tracks_from_playlist, token, source_playlist_id, uris)
-        removed = len(uris)
+        try:
+            await run_in_threadpool(spotify_api.remove_tracks_from_playlist, token, source_playlist_id, uris)
+            removed = len(uris)
+        except spotify_api.SpotifyAPIError as e:
+            remove_error = str(e)
 
-    return {"added": len(uris), "removed": removed, "target_playlist_id": target_playlist_id}
+    result = {"added": len(uris), "removed": removed, "target_playlist_id": target_playlist_id}
+    if remove_error:
+        result["remove_error"] = remove_error
+    return result
