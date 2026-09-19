@@ -22,6 +22,7 @@ document.getElementById('logout-btn').onclick = async () => {
 };
 
 let sourcePlaylists = [];
+let lastAnalysis = null; // {source_playlist_id, total_tracks, breakdown, tracks}
 
 async function init() {
   setStatus('Checking connection...');
@@ -72,46 +73,26 @@ async function init() {
 
 // ---------------------------------------------------------------- helpers
 
-const GENRE_BUCKETS = ['Pop Rock', 'EDM', 'Indie'];
-const SOURCE_CODES = { spotify: 'SP', lastfm: 'LF', musicbrainz: 'MB' };
-
-function votePills(track) {
-  const votes = track.votes || {};
-  return Object.entries(votes).map(([source, bucket]) => {
-    const code = SOURCE_CODES[source] || source.slice(0, 2).toUpperCase();
-    const cls = bucket ? 'vote-pill matched' : 'vote-pill';
-    return `<span class="${cls}">${code} ${bucket || '—'}</span>`;
-  }).join('');
-}
-
-function agreementMeter(track) {
-  const votes = Object.values(track.votes || {}).filter(Boolean);
-  const counts = {};
-  votes.forEach(v => { counts[v] = (counts[v] || 0) + 1; });
-  const max = Object.values(counts).reduce((a, b) => Math.max(a, b), 0);
-  let segs = '';
-  for (let i = 0; i < 3; i++) {
-    segs += `<span class="meter-seg${i < max ? ' filled' : ''}"></span>`;
-  }
-  return `<span class="meter" title="${max} of 3 sources agree">${segs}</span>`;
-}
-
-function confidenceBadge(track) {
-  if (track.confidence === 'high') return '<span class="confidence-badge high">High confidence</span>';
-  if (track.confidence === 'low') return '<span class="confidence-badge low">Needs review</span>';
-  return '<span class="confidence-badge none">No match</span>';
-}
-
 // A track's genre(s) -- at most 2, combined across all 3 sources (see
 // display_genres in genre.py) so multi-source agreement decides the
 // label instead of dumping every raw tag from every source. Empty when
 // nothing was detected anywhere, so a track with no data just shows
-// nothing rather than "no tags found" x3 -- shown regardless of match
-// state, so a "Needs Review" or "Unmatched" track still shows what was
-// actually detected, not just a pass/fail vote pill.
+// nothing rather than a "no tags found" placeholder.
 function genrePills(track) {
   const genres = track.display_genres || [];
   return genres.map(g => `<span class="vote-pill matched">${g}</span>`).join('');
+}
+
+function targetOptionsHtml() {
+  const sourceId = document.getElementById('source-select').value;
+  return sourcePlaylists
+    .filter(p => p.id !== sourceId)
+    .map(p => `<option value="${p.id}">${p.name}</option>`)
+    .join('');
+}
+
+function stateClassFor(label) {
+  return label === 'Unmatched' ? 'state-none' : '';
 }
 
 // ---------------------------------------------------------------- analyze
@@ -129,7 +110,8 @@ async function pollAnalysis() {
     if (status.error) {
       throw new Error(status.error);
     }
-    renderBreakdown(status);
+    lastAnalysis = status;
+    renderBreakdown();
     setStatus(`Analyzed ${status.total_tracks} tracks.`);
     return;
   }
@@ -154,14 +136,12 @@ document.getElementById('analyze-btn').onclick = async () => {
   }
 };
 
-function stateClassFor(label) {
-  if (label === 'Needs Review') return 'state-review';
-  if (label === 'Unmatched') return 'state-none';
-  return '';
-}
+// -------------------------------------------------------------- breakdown
 
-function renderBreakdown(data) {
+function renderBreakdown() {
+  const data = lastAnalysis;
   const el = document.getElementById('breakdown-list');
+  const total = data.total_tracks || 1;
   const entries = Object.entries(data.breakdown).sort((a, b) => b[1] - a[1]);
   const maxCount = Math.max(...entries.map(([, c]) => c), 1);
 
@@ -170,13 +150,22 @@ function renderBreakdown(data) {
     (tracksByGenre[t.genre] = tracksByGenre[t.genre] || []).push(t);
   }
 
-  el.innerHTML = entries.map(([label, count], i) => `
+  const targetOptions = targetOptionsHtml();
+
+  el.innerHTML = entries.map(([label, count], i) => {
+    const pct = Math.round((count / total) * 100);
+    const uris = (tracksByGenre[label] || []).map(t => t.uri);
+    return `
     <div class="bar-row" data-toggle="bd-panel-${i}">
       <div class="bar-row-top">
         <span class="bar-label"><span class="chevron">▸</span>${label}</span>
-        <span class="bar-count">${count}</span>
+        <span class="bar-count">${count} (${pct}%)</span>
       </div>
       <div class="bar-track"><div class="bar-fill ${stateClassFor(label)}" style="width:${(count / maxCount * 100).toFixed(0)}%"></div></div>
+      <div class="inline-move" data-uris='${JSON.stringify(uris)}'>
+        ${moveTriggerHtml(`Move all ${count}`, targetOptions)}
+        ${moveConfirmHtml(count)}
+      </div>
     </div>
     <div class="track-list hidden" id="bd-panel-${i}">
       ${(tracksByGenre[label] || []).map(t => `
@@ -185,10 +174,15 @@ function renderBreakdown(data) {
             <div class="track-title">${t.name} <span class="track-artist">— ${t.artist}</span></div>
             ${genrePills(t) ? `<div class="vote-row">${genrePills(t)}</div>` : ''}
           </div>
+          <div class="inline-move" data-uris='${JSON.stringify([t.uri])}'>
+            ${moveTriggerHtml('Move', targetOptions)}
+            ${moveConfirmHtml(1)}
+          </div>
         </div>
       `).join('')}
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   el.querySelectorAll('.bar-row').forEach(row => {
     row.onclick = () => {
@@ -199,177 +193,96 @@ function renderBreakdown(data) {
     };
   });
 
-  renderDominantGenre(data);
+  wireMoveControls(el);
   document.getElementById('breakdown-card').classList.remove('hidden');
-  renderReview(data);
-  renderMapping(data);
 }
 
-function renderDominantGenre(data) {
-  const el = document.getElementById('dominant-genre-summary');
-  const rows = data.dominant_genre || [];
-  if (rows.length === 0) {
-    el.innerHTML = 'No genre data detected for this playlist.';
-    return;
-  }
-  el.innerHTML = 'Dominant genre (by track tags, not playlist name): ' +
-    rows.map(r => `<strong>${r.pct}% ${r.label}</strong>`).join(', ');
+function moveTriggerHtml(buttonLabel, targetOptions) {
+  return `
+    <span class="move-trigger">
+      <select class="move-target">${targetOptions}</select>
+      <button class="move-btn secondary">${buttonLabel}</button>
+    </span>`;
 }
 
-// ------------------------------------------------------------------ review
-
-function renderReview(data) {
-  const el = document.getElementById('review-list');
-  const reviewTracks = data.tracks.filter(t => t.genre === 'Needs Review');
-  const card = document.getElementById('review-card');
-
-  if (reviewTracks.length === 0) {
-    card.classList.add('hidden');
-    el.innerHTML = '';
-    return;
-  }
-
-  const resolveOptions = '<option value="">Leave for now</option>' +
-    GENRE_BUCKETS.map(b => `<option value="${b}">${b}</option>`).join('') +
-    '<option value="Unmatched">Mark unmatched</option>';
-
-  el.innerHTML = reviewTracks.map(t => `
-    <div class="track-row">
-      <div class="track-info">
-        <div class="track-title">${t.name} <span class="track-artist">— ${t.artist}</span></div>
-        <div class="vote-row">${votePills(t)}${agreementMeter(t)}</div>
-        ${genrePills(t) ? `<div class="vote-row">${genrePills(t)}</div>` : ''}
-      </div>
-      <select class="resolve-select" data-uri="${t.uri}">${resolveOptions}</select>
-    </div>
-  `).join('');
-
-  card.classList.remove('hidden');
+function moveConfirmHtml(count) {
+  return `
+    <span class="move-confirm hidden">
+      <span class="confirm-text">Move ${count} track${count === 1 ? '' : 's'} to <strong class="move-confirm-name"></strong>?</span>
+      <label><input type="checkbox" class="move-remove"> remove from source</label>
+      <button class="move-confirm-btn">Confirm</button>
+      <button class="move-cancel-btn secondary">Cancel</button>
+    </span>`;
 }
 
-document.getElementById('save-review-btn').onclick = async () => {
-  const selects = document.querySelectorAll('#review-list select[data-uri]');
-  const resolutions = {};
-  selects.forEach(sel => {
-    if (sel.value) resolutions[sel.dataset.uri] = sel.value;
+function wireMoveControls(root) {
+  root.querySelectorAll('.inline-move').forEach(container => {
+    // Stops a click on the select/buttons from bubbling up to the
+    // .bar-row's own click handler, which would otherwise also toggle
+    // that genre's expand/collapse panel.
+    container.addEventListener('click', (e) => e.stopPropagation());
+
+    const trigger = container.querySelector('.move-trigger');
+    const confirmBox = container.querySelector('.move-confirm');
+    const targetSelect = container.querySelector('.move-target');
+    const confirmName = container.querySelector('.move-confirm-name');
+    const moveBtn = container.querySelector('.move-btn');
+    const confirmBtn = container.querySelector('.move-confirm-btn');
+    const cancelBtn = container.querySelector('.move-cancel-btn');
+    const removeCheckbox = container.querySelector('.move-remove');
+
+    moveBtn.onclick = () => {
+      if (!targetSelect.value) {
+        setStatus('Pick a target playlist first.', true);
+        return;
+      }
+      confirmName.textContent = targetSelect.selectedOptions[0].textContent;
+      trigger.classList.add('hidden');
+      confirmBox.classList.remove('hidden');
+    };
+
+    cancelBtn.onclick = () => {
+      confirmBox.classList.add('hidden');
+      trigger.classList.remove('hidden');
+    };
+
+    confirmBtn.onclick = async () => {
+      const uris = JSON.parse(container.dataset.uris);
+      const targetId = targetSelect.value;
+      const targetName = targetSelect.selectedOptions[0].textContent;
+      const removeFromSource = removeCheckbox.checked;
+      confirmBtn.disabled = true;
+      try {
+        const result = await api('/api/move', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uris, target_playlist_id: targetId, remove_from_source: removeFromSource }),
+        });
+        applyMoveResult(uris);
+        setStatus(`Moved ${result.added} track(s) to ${targetName}${result.removed ? ' (removed from source)' : ''}.`);
+      } catch (e) {
+        setStatus('Error: ' + e.message, true);
+        confirmBtn.disabled = false;
+      }
+    };
   });
-  if (Object.keys(resolutions).length === 0) {
-    setStatus('No review choices selected.');
-    return;
-  }
-  setStatus('Saving review choices...');
-  try {
-    const data = await api('/api/resolve_review', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resolutions }),
-    });
-    renderBreakdown(data);
-    setStatus('Review choices saved.');
-  } catch (e) {
-    setStatus('Error: ' + e.message, true);
-  }
-};
-
-// ----------------------------------------------------------------- mapping
-
-function renderMapping(data) {
-  const sourceId = document.getElementById('source-select').value;
-  const targetOptions = sourcePlaylists.filter(p => p.id !== sourceId);
-  const optionsHtml = '<option value="">Don\'t sort</option>' +
-    targetOptions.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-
-  const entries = Object.entries(data.breakdown).sort((a, b) => b[1] - a[1]);
-  const el = document.getElementById('mapping-list');
-  el.innerHTML = entries
-    .filter(([label]) => label !== 'Unmatched' && label !== 'Needs Review')
-    .map(([label, count]) => `
-      <div class="map-row">
-        <span class="row-label">${label} <span class="row-count">${count}</span></span>
-        <select data-genre="${label}">${optionsHtml}</select>
-      </div>
-    `).join('');
-  if (data.breakdown['Needs Review']) {
-    el.innerHTML += `<div class="row-note">Needs Review (${data.breakdown['Needs Review']}) — resolve these above before they can be sorted</div>`;
-  }
-  if (data.breakdown['Unmatched']) {
-    el.innerHTML += `<div class="row-note">Unmatched (${data.breakdown['Unmatched']}) — no genre signal, always left alone</div>`;
-  }
-  document.getElementById('mapping-card').classList.remove('hidden');
-  document.getElementById('preview-card').classList.add('hidden');
-  document.getElementById('result-card').classList.add('hidden');
 }
 
-document.getElementById('preview-btn').onclick = async () => {
-  const selects = document.querySelectorAll('#mapping-list select[data-genre]');
-  const mapping = {};
-  selects.forEach(sel => {
-    if (sel.value) mapping[sel.dataset.genre] = sel.value;
-  });
-  setStatus('Building preview...');
-  try {
-    const data = await api('/api/preview', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mapping }),
-    });
-    renderPreview(data);
-    setStatus('Preview ready. Nothing written to Spotify yet.');
-  } catch (e) {
-    setStatus('Error: ' + e.message, true);
+// Removes moved tracks from the in-memory analysis, recomputes the
+// breakdown, and re-renders -- avoids a full re-analyze (and its
+// MusicBrainz-throttled wait) just to reflect a move that already
+// happened. Re-rendering collapses any expanded genre panels back to
+// closed, which is an accepted trade-off for not hand-patching the DOM.
+function applyMoveResult(movedUris) {
+  const movedSet = new Set(movedUris);
+  lastAnalysis.tracks = lastAnalysis.tracks.filter(t => !movedSet.has(t.uri));
+  lastAnalysis.total_tracks = lastAnalysis.tracks.length;
+  const breakdown = {};
+  for (const t of lastAnalysis.tracks) {
+    breakdown[t.genre] = (breakdown[t.genre] || 0) + 1;
   }
-};
-
-function renderPreview(data) {
-  const el = document.getElementById('preview-list');
-  let html = '';
-  if (data.targets.length === 0) {
-    html += '<p class="muted">No genres mapped to a target playlist -- nothing would be added anywhere.</p>';
-  }
-  for (const target of data.targets) {
-    html += `<div class="preview-group"><h3>${target.playlist_name} <span class="preview-count">+${target.count}</span></h3>`;
-    html += '<div class="track-list">' + target.tracks.map(t => `<div>${t.name} <span class="muted">— ${t.artist}</span> <span class="track-tag">${t.genre}</span></div>`).join('') + '</div></div>';
-  }
-  html += `<div class="preview-group"><h3>Not moving <span class="preview-count">${data.unmapped_count}</span></h3>`;
-  html += '<div class="track-list">' + data.unmapped.map(t => `<div>${t.name} <span class="muted">— ${t.artist}</span> <span class="track-tag">${t.genre}</span></div>`).join('') + '</div></div>';
-  el.innerHTML = html;
-  document.getElementById('preview-card').classList.remove('hidden');
-}
-
-document.getElementById('confirm-btn').onclick = async () => {
-  const removeFromSource = document.getElementById('remove-from-source').checked;
-  const confirmBtn = document.getElementById('confirm-btn');
-  confirmBtn.disabled = true;
-  setStatus('Applying changes to Spotify...');
-  try {
-    const data = await api('/api/confirm', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ remove_from_source: removeFromSource }),
-    });
-    renderResult(data);
-    setStatus('Done.');
-  } catch (e) {
-    setStatus('Error: ' + e.message, true);
-  } finally {
-    confirmBtn.disabled = false;
-  }
-};
-
-function renderResult(data) {
-  const el = document.getElementById('result-list');
-  let html = '';
-  for (const r of data.results) {
-    html += `<li>Added ${r.added} track(s) to <strong>${r.playlist_name}</strong></li>`;
-  }
-  if (data.removed_from_source) {
-    html += `<li>Removed ${data.removed_from_source} track(s) from the source playlist (move mode)</li>`;
-  } else {
-    html += `<li>Source playlist left untouched (copy mode)</li>`;
-  }
-  html += `<li>${data.unmapped_left_in_place} track(s) left unsorted, untouched</li>`;
-  el.innerHTML = html;
-  document.getElementById('result-card').classList.remove('hidden');
+  lastAnalysis.breakdown = breakdown;
+  renderBreakdown();
 }
 
 init();
