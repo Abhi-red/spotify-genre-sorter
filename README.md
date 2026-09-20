@@ -44,14 +44,15 @@ is fast.
 
 ## Live demo
 
-The webapp is deployed on Railway, but Spotify apps start in **Development
-Mode**, which caps login to a manually allow-listed list of Spotify
-accounts (25 max) until the app goes through Spotify's extension review.
-That means the hosted instance only works for allow-listed accounts right
-now — a stranger hitting "Connect Spotify" will get an access-restricted
-error, not a bug in the app itself. Reach out if you'd like your Spotify
-account added, or run it locally against your own Spotify app credentials
-(below) to try it with your own library.
+**[spotify-genre-sorter-production-e3a9.up.railway.app](https://spotify-genre-sorter-production-e3a9.up.railway.app)**
+
+Spotify apps start in **Development Mode**, which caps login to a manually
+allow-listed set of Spotify accounts (25 max) until the app goes through
+Spotify's extension review. That means the hosted instance only works for
+allow-listed accounts right now — a stranger hitting "Connect Spotify"
+will get an access-restricted error, not a bug in the app itself. Reach
+out if you'd like your Spotify account added, or run it locally against
+your own Spotify app credentials (below) to try it with your own library.
 
 ## Tech stack
 
