@@ -53,7 +53,10 @@ def exchange_code(code: str) -> dict:
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
     })
-    resp.raise_for_status()
+    if not resp.ok:
+        # Spotify's error body (e.g. "invalid_client", "invalid_grant") is
+        # swallowed by raise_for_status()'s generic message -- surface it.
+        raise RuntimeError(f"Spotify token exchange failed ({resp.status_code}): {resp.text}")
     return _to_token_info(resp.json())
 
 
