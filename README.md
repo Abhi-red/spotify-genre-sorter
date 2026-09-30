@@ -60,16 +60,18 @@ your own Spotify app credentials (below) to try it with your own library.
 - **Frontend:** vanilla JS/HTML/CSS (no framework, no build step)
 - **Data sources:** Spotify Web API, Last.fm API, MusicBrainz API
 - **Deploy:** Railway (`webapp/Procfile`)
-- **Tests:** `pytest` (`webapp/test_genre.py`, `webapp/test_genre_taxonomy.py`)
+- **Checks:** standalone genre verification scripts in `webapp/`
 
 ## Running locally
 
 Requires a [Spotify Developer app](https://developer.spotify.com/dashboard)
 (free) with a redirect URI of `http://127.0.0.1:8080`.
 
+From the repository root:
+
 ```bash
 cd webapp
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 Create `secrets.env` in the repo root:
@@ -84,20 +86,19 @@ LASTFM_API_KEY=your_lastfm_api_key
 MUSICBRAINZ_USER_AGENT=YourAppName/1.0 ( your_contact_info )
 ```
 
-Run it:
+From `webapp/`, run it:
 
 ```bash
-cd webapp
 uvicorn main:app --host 127.0.0.1 --port 8080
 ```
 
 Open `http://127.0.0.1:8080`, connect Spotify, pick a playlist, and analyze.
 
-Run the tests:
+Run the genre checks from `webapp/`:
 
 ```bash
-cd webapp
-pytest
+python test_genre.py
+python test_genre_taxonomy.py
 ```
 
 ## Project structure
